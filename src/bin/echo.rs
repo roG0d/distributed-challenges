@@ -1,32 +1,7 @@
+use rustengan::*;
 use serde::{Serialize, Deserialize};
 use anyhow::{Context, bail};
 use std::io::{StdoutLock, Write};
-
-
-// Struct Message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Message  {
-    src: String,
-
-    #[serde(rename = "dest")]
-    dst: String,
-
-    body: Body,
-}
-
-// Struct Body because of its complexity
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Body {
-
-    #[serde(rename = "msg_id")]
-    id: Option<usize>,
-
-    in_reply_to: Option<usize>,
-    
-    // Needed to flatten the resulting JSON
-    #[serde(flatten)]
-    payload: Payload,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // Serde decorator to call Payload as type
@@ -45,12 +20,13 @@ struct EchoNode{
     id:usize,
 }
 
-impl EchoNode{
+// Implementation of the trait Node for EchoNode
+impl Node<Payload> for EchoNode{
 
     // fn step to act at any given message depending on its payload
-    pub fn step<'a> (
+    fn step<'a> (
         &mut self, 
-        input: Message, 
+        input: Message<Payload>, 
         output: &mut StdoutLock
     ) -> anyhow::Result<()>{
         
@@ -100,30 +76,10 @@ impl EchoNode{
 
 fn main() -> anyhow::Result<()>{
 
-    // Lock the stdin for the thread 
-    let stdin = std::io::stdin().lock();
-
-    // Deserizalize json into Message structs creating an iterator
-    let inputs  = serde_json::Deserializer::from_reader(stdin).into_iter::<Message>();
-
-    // Lock the stdout for the thread
-    let mut stdout = std::io::stdout().lock();
-
-    // initialization of echonodes
-    let mut state = EchoNode {
-        id: 0,
-    };
-
-    // For every input:
-    for input in inputs {
-        let input = input.context("Malestrom input from STDIN could not be deserialized")?;
-
-        // Take the step fn 
-        state.step(input, &mut stdout).context("Node step function failed")?;
-    }
-
+    //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
+    let _ = main_loop(EchoNode{ id : 0});
     Ok(())
-}
+ }
 
-// command to run malestron echo test, has to be on maelstrom file where maelstrom.bash is (have to indicate the rust compilation target too)
+// command to run malestron echo test, has to be on maelstrom file where maelstrom.bash is (have to indicate the rust compilation target tooz)
 // ./maelstrom test -w echo --bin ../../rustengan/target/debug/rustengan --node-count 1 --time-limit 10

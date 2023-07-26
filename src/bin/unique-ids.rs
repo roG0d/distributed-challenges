@@ -1,6 +1,7 @@
 use rustengan::*;
 use serde::{Serialize, Deserialize};
 use anyhow::{Context, bail};
+use ulid::Ulid;
 use std::io::{StdoutLock, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,17 +12,19 @@ use std::io::{StdoutLock, Write};
 enum Payload {
     Init{node_id: String, node_ids:Vec<String>},
     InitOk{},
-    Echo {echo: String},
-    EchoOk {echo: String},
+    Generate{},
+    GenerateOk{
+        #[serde(rename="id")]
+        guid: String}
 
 }
 
-struct EchoNode{
+struct UniqueNode{
     id:usize,
 }
 
 // Implementation of the trait Node for EchoNode
-impl Node<Payload> for EchoNode{
+impl Node<Payload> for UniqueNode{
 
     // fn step to act at any given message depending on its payload
     fn step<'a> (
@@ -50,24 +53,24 @@ impl Node<Payload> for EchoNode{
 
             }       
             Payload::InitOk { .. } =>  bail!("can't have an InitOk reply"),
-            Payload::Echo { echo } =>{
-
+            Payload::Generate { } =>{
+                let guid = Ulid::new().to_string();
                 let reply = Message {
                     src: input.dst,
                     dst: input.src,
                     body: Body {
                         id: Some(self.id),
                         in_reply_to: input.body.id,
-                        payload: Payload::EchoOk { echo },
+                        payload: Payload::GenerateOk { guid },
                     },
                 };
 
                 // Serialize the rust struct into a json object with context in case of fail
-                serde_json::to_writer(&mut *output, &reply).context("serialize response to echo")?;
+                serde_json::to_writer(&mut *output, &reply).context("serialize response to generate")?;
                 let _ = output.write_all(b"\n").context("Write trailing newline");
                 self.id += 1;
             }
-            Payload::EchoOk { .. }  => {} 
+            Payload::GenerateOk { .. }  => {} 
         }
             Ok(())
         }
@@ -77,9 +80,9 @@ impl Node<Payload> for EchoNode{
 fn main() -> anyhow::Result<()>{
 
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
-    let _ = main_loop(EchoNode{ id : 0});
+    let _ = main_loop(UniqueNode{ id : 0});
     Ok(())
  }
 
-// command to run malestron echo test, has to be on maelstrom file where maelstrom.bash is (have to indicate the rust compilation target tooz)
-// ./maelstrom test -w echo --bin ../../rustengan/target/debug/echo --node-count 1 --time-limit 10
+// command to run malestron uinque-ids test, has to be on maelstrom file where maelstrom exe is (have to indicate the rust compilation target too)
+// ./maelstrom test -w unique-ids --bin ../../rustengan/target/debug/unique-ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition

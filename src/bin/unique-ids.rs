@@ -10,8 +10,6 @@ use std::io::{StdoutLock, Write};
 // Serde decorator to convert every Enum payload into snake_cases
 #[serde(rename_all = "snake_case")]
 enum Payload {
-    Init{node_id: String, node_ids:Vec<String>},
-    InitOk{},
     Generate{},
     GenerateOk{
         #[serde(rename="id")]
@@ -20,11 +18,19 @@ enum Payload {
 }
 
 struct UniqueNode{
+    node: String,
     id:usize,
 }
 
 // Implementation of the trait Node for EchoNode
-impl Node<Payload> for UniqueNode{
+impl Node<(), Payload> for UniqueNode{
+
+    fn from_init(_state: (), init: Init) -> anyhow::Result<Self> 
+        where 
+            Self:Sized {
+        Ok(UniqueNode { node: init.node_id,
+                        id: 1 })
+    }
 
     // fn step to act at any given message depending on its payload
     fn step<'a> (
@@ -34,27 +40,10 @@ impl Node<Payload> for UniqueNode{
     ) -> anyhow::Result<()>{
         
         match input.body.payload {
-            Payload::Init{ .. } => {
-                let reply =  Message {
-                    src: input.dst,
-                    dst: input.src,
-                    body: Body {
-                        id: Some(self.id),
-                        in_reply_to: input.body.id,
-                        payload: Payload::InitOk { },
-                    },
-                };
-
-                // Serialize the rust struct into a json object with context in case of fail
-                serde_json::to_writer(&mut *output, &reply).context("serialize response to init")?;
-                let _ = output.write_all(b"\n").context("Write trailing newline");
-
-                self.id += 1;
-
-            }       
-            Payload::InitOk { .. } =>  bail!("can't have an InitOk reply"),
             Payload::Generate { } =>{
-                let guid = Ulid::new().to_string();
+                //crate to generate unique ids
+                //let guid = Ulid::new().to_string();
+                let guid = format!("{}-{}", self.node, self.id);
                 let reply = Message {
                     src: input.dst,
                     dst: input.src,
@@ -80,7 +69,7 @@ impl Node<Payload> for UniqueNode{
 fn main() -> anyhow::Result<()>{
 
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
-    let _ = main_loop(UniqueNode{ id : 0});
+    let _ = main_loop::<_, UniqueNode, _>(());
     Ok(())
  }
 

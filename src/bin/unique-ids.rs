@@ -1,7 +1,7 @@
 use rustengan::*;
 use serde::{Serialize, Deserialize};
-use anyhow::{Context, bail};
-use ulid::Ulid;
+use anyhow::Context;
+//use ulid::Ulid;
 use std::io::{StdoutLock, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,20 +39,13 @@ impl Node<(), Payload> for UniqueNode{
         output: &mut StdoutLock
     ) -> anyhow::Result<()>{
         
-        match input.body.payload {
+        let mut reply = input.into_reply(Some(&mut self.id));
+        match reply.body.payload {
             Payload::Generate { } =>{
                 //crate to generate unique ids
                 //let guid = Ulid::new().to_string();
                 let guid = format!("{}-{}", self.node, self.id);
-                let reply = Message {
-                    src: input.dst,
-                    dst: input.src,
-                    body: Body {
-                        id: Some(self.id),
-                        in_reply_to: input.body.id,
-                        payload: Payload::GenerateOk { guid },
-                    },
-                };
+                reply.body.payload = Payload::GenerateOk { guid };
 
                 // Serialize the rust struct into a json object with context in case of fail
                 serde_json::to_writer(&mut *output, &reply).context("serialize response to generate")?;

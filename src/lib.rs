@@ -1,6 +1,6 @@
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
-use anyhow::{Context};
+use anyhow::Context;
 use std::io::{BufRead, StdoutLock, Write};
 
 // Struct Message
@@ -12,6 +12,25 @@ pub struct Message<Payload>  {
     pub body: Body<Payload>,
 }
 
+// Creation of the message for a generic type of payload
+impl<P> Message<P>{
+    pub fn into_reply(self, id: Option<&mut usize>) -> Self {
+        Self {
+            src: self.dst,
+            dst: self.src,
+            body: Body {
+                id: id.map(|id| {
+                    let mid = *id;
+                    *id += 1;
+                    mid
+            }),
+                in_reply_to: self.body.id,
+                payload: self.body.payload,
+            },
+        }
+
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Body<Payload> {
     #[serde(rename = "msg_id")]

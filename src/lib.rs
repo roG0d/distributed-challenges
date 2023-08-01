@@ -30,6 +30,7 @@ impl<P> Message<P>{
         }
 
     }
+    
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Body<Payload> {

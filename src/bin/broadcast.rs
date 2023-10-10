@@ -1,4 +1,5 @@
 use anyhow::Context;
+use rand::prelude::*;
 use rustengan::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -104,10 +105,18 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
 
             // If we get and Event we match which and then perform the task
             Event::Injected(payload) => match payload {
-                // For a gossip, we send a message to every neighbor with the neigborhood each node knows
+                // For a gossip, we send a message to our neighborhood with the nodes we know about, reminding which nodes
+                // they already known
                 InjectedPayload::Gossip => {
                     for n in &self.neighborhood {
-                        let known_to_n = &self.known[n];
+                        // 1/4 times we let a gossip with every known node, bypassing the optimization but securing dropped messages
+                        let mut known_to_n = &HashSet::new();
+                        let mut rng = rand::thread_rng();
+
+                        if rng.gen::<f32>() < 0.75 {
+                            known_to_n = self.known.get_mut(n).expect("unkown node");
+                        }
+
                         Message {
                             src: self.node.clone(),
                             dst: n.clone(),
@@ -127,6 +136,7 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
                         .send(&mut *output)
                         .with_context(|| format!("gossip to {}", n))?;
                     }
+
                     Ok(())
                 }
             },

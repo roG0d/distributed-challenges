@@ -16,3 +16,6 @@ anyhow = "1"
 
 # Crate for unique id generation
 ulid = "1"
+
+# Crate Random
+rand = "0.8.5"

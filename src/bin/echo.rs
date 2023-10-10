@@ -1,41 +1,45 @@
+use anyhow::Context;
 use rustengan::*;
-use serde::{Serialize, Deserialize};
-use anyhow::{Context};
+use serde::{Deserialize, Serialize};
 use std::io::{StdoutLock, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // Serde decorator to call Payload as type
-#[serde(tag="type")]
+#[serde(tag = "type")]
 // Serde decorator to convert every Enum payload into snake_cases
 #[serde(rename_all = "snake_case")]
 enum Payload {
-    Echo {echo: String},
-    EchoOk {echo: String},
-
+    Echo { echo: String },
+    EchoOk { echo: String },
 }
 
-struct EchoNode{
-    id:usize,
+struct EchoNode {
+    id: usize,
 }
 
 // Implementation of the trait Node for EchoNode
-impl Node<(), Payload> for EchoNode{
-    fn from_init(_state: (), _init: Init) -> anyhow::Result<Self> 
-        where 
-            Self:Sized {
-        Ok(EchoNode{id: 1})
+impl Node<(), Payload> for EchoNode {
+    fn from_init(
+        _state: (),
+        _init: Init,
+        _sx: std::sync::mpsc::Sender<Event<Payload>>,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(EchoNode { id: 1 })
     }
 
     // fn step to act at any given message depending on its payload
-    fn step<'a> (
-        &mut self, 
-        input: Message<Payload>, 
-        output: &mut StdoutLock
-    ) -> anyhow::Result<()>{
-        
-        match input.body.payload {
-            Payload::Echo { echo } =>{
+    fn step<'a>(&mut self, input: Event<Payload>, output: &mut StdoutLock) -> anyhow::Result<()> {
 
+        // We assure that the Event we receive is an message type one, not a injected
+        let Event::Message(input) = input else {
+            panic!("got injected event when there's no event injection");
+        };
+
+        match input.body.payload {
+            Payload::Echo { echo } => {
                 let reply = Message {
                     src: input.dst,
                     dst: input.src,
@@ -50,19 +54,17 @@ impl Node<(), Payload> for EchoNode{
                 output.write_all(b"\n").context("write trailing newline")?;
                 self.id += 1;
             }
-            Payload::EchoOk { .. }  => {} 
+            Payload::EchoOk { .. } => {}
         }
-            Ok(())
-        }
-      
+        Ok(())
+    }
 }
 
-fn main() -> anyhow::Result<()>{
-
+fn main() -> anyhow::Result<()> {
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
-    let _ = main_loop::<_, EchoNode, _>(());
+    let _ = main_loop::<_, EchoNode, _, _>(());
     Ok(())
- }
+}
 
 // command to run malestron echo test, has to be on maelstrom file where maelstrom.bash is (have to indicate the rust compilation target tooz)
 // ./maelstrom test -w echo --bin ../../rustengan/target/debug/echo --node-count 1 --time-limit 10

@@ -1,7 +1,17 @@
 //Lib.rs contains all common code for the challenges to execute
 use anyhow::Context;
+use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::io::{stdin, BufRead, StdoutLock, Write};
+use std::{
+    future::Future,
+    io::{stdin, BufRead, StdoutLock, Write},
+    sync::Arc,
+};
+use tokio::{
+    io::{AsyncWriteExt, Stdout},
+    sync::Mutex,
+    task::{self, JoinHandle},
+};
 
 // Struct Message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,44 +86,41 @@ pub struct Init {
 }
 
 //Definition of trait Node
-pub trait Node<S, Payload, InjectedPayload = ()> {
+#[async_trait]
+pub trait Node<S, Payload> {
     // Init for the specific node
-    fn from_init(
-        state: S,
-        init: Init,
-        inject: std::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
-    ) -> anyhow::Result<Self>
+    fn from_init(state: S, init: Init) -> anyhow::Result<Self>
     where
         Self: Sized;
 
     // Protocol for the specific node
-    fn step(
+
+    async fn step<'a>(
         &mut self,
-        input: Event<Payload, InjectedPayload>,
-        output: &mut StdoutLock,
+        input: Message<Payload>,
+        output: &'a mut tokio::io::Stdout,
     ) -> anyhow::Result<()>;
 }
 
-/* 
+/*
 Main loop of the program, where all the communication happens. It starts with the creation of a channel to receive events from STDIN.
 To alternate between events threads will be created to read from STDIN and then send messages to a channel which will indicate which
 tasks to perform: interchanging protocols and gossiping.
   */
-pub fn main_loop<S, N, P, IP>(init_state: S) -> anyhow::Result<()>
+#[tokio::main]
+pub async fn main_loop<S, N, P>(init_state: S) -> anyhow::Result<()>
 where
     P: DeserializeOwned + Send + 'static,
-    N: Node<S, P, IP>,
-    IP: Send + 'static,
+    N: Node<S, P> + Send + 'static,
 {
-    // Creating a channel so we can alternate between protocols and gossips
-    let (sx, rx) = std::sync::mpsc::channel();
+    // Init phase
 
     // Lock the stdin for the init messages
     let stdin = std::io::stdin().lock();
     let mut stdin = stdin.lines();
 
-    // Lock the stdout
-    let mut stdout = std::io::stdout().lock();
+    // Create the async stdout
+    let mut stdout = tokio::io::stdout();
 
     // Get the first msg from stdin to check if there's messages
     let init_msg: Message<InitPayload> = serde_json::from_str(
@@ -130,8 +137,7 @@ where
     };
 
     // If so, initialize the node and send a initOk reply
-    let mut node: N =
-        Node::from_init(init_state, init, sx.clone()).context("node initilization failed")?;
+    let node: N = Node::from_init(init_state, init).context("node initilization failed")?;
 
     let reply = Message {
         src: init_msg.dst,
@@ -143,41 +149,66 @@ where
         },
     };
 
-    // reply to the init
-    serde_json::to_writer(&mut stdout, &reply).context("serialize response to init")?;
-    stdout.write_all(b"\n").context("write trailing newline")?;
+    // reply to the init in the async stdout
+    stdout
+        .write_all(&serde_json::to_vec(&reply).expect("Cannot convert to bytes"))
+        .await?; // Serialize the respond and write it into the buffer -> await needed to wait for the completion of the future
+    stdout.write_all(b"\n").await?;
 
-    // STDIN unlocked
-    drop(stdin);
+    // Protocols phase
+    // Vec for accumulate the tasks and lastly, wait for them to finish
+    let mut tasks = vec![];
 
-    // Spawn threads that will read from the STDIN. It's an synchronous way to perfom a select over multiple tasks
-    let jh = std::thread::spawn(move || {
-        // Lock the stdin for every thread
-        let stdin = std::io::stdin().lock();
+    // Two thread-safe reference-counting pointer for shared values as the node and the stdout has both async properties and need to be thread-safe if we want to spawn async task
+    let node = Arc::new(Mutex::new(node));
+    let stdout = Arc::new(Mutex::new(stdout));
 
-        // this loop its gonna read from STDIN, get a message with an event, and send it to the receiver so then it can be performed
-        for line in stdin.lines() {
-            let line = line.context("Maelstrom input from STDIN could not be read")?;
-            let input: Message<P> = serde_json::from_str(&line)
-                .context("Maelstrom input from STDIN could not be deserialized")?;
-            if let Err(_) = sx.send(Event::Message(input)) {
-                return Ok::<_, anyhow::Error>(()).context("Message could not be sent to the channel");
-            }
-        }
-        let _ = sx.send(Event::EOF);
-        Ok(())
-    });
+    /* CLARIFICATION ARC-MUTEX
+    In Rust, values are moved when they are passed to functions or closures, and by default they cannot be used again after being moved unless they implement the Copy trait.
+    In this actual code, we are attempting to use stdout inside an asynchronous block within a loop. The async move block will take ownership of stdout during the first iteration
+    of the loop, moving it into the block. In subsequent iterations, stdout will no longer be available because it has been moved, hence the error "use of moved value: stdout".
 
-    // Iterates the receiver looking for Events and executes step function for every one of them
-    for input in rx {
-        node.step(input, &mut stdout)
-            .context("Node step function failed")?;
+    One common way to address this issue is to use reference counting to share stdout between iterations of the loop.
+    The Arc (Atomic Reference Counted) and Mutex (Mutual Exclusion) types from the Rust standard library can be used like this to share safely between iterations:
+
+     */
+    // For every line we get from the sync stdin:
+    for line in stdin {
+        // We clone the Arc (not the stdout and the node themself), which increments the reference count but doesn't duplicate the underlying object.
+        let node_clone = Arc::clone(&node);
+        let stdout_clone = Arc::clone(&stdout);
+
+        // Parsing the stdin lines
+        let line = line
+            .context("Maelstrom input from STDIN could not be read")
+            .expect("Error on STDIN read");
+        let input: Message<P> = serde_json::from_str(&line)
+            .context("Maelstrom input from STDIN could not be deserialized")
+            .expect("Expected message from STDIN");
+
+        /* NOTE ON TOKIO::SPAWN
+        Spawning a task enables the task to execute concurrently to other tasks. The spawned task may execute on the current thread, or it may be sent to a different thread to be executed.
+        The specifics depend on the current Runtime configuration.
+
+        It is guaranteed that spawn will not synchronously poll the task being spawned. This means that calling spawn while holding a lock does not pose a risk of deadlocking with the spawned task.
+
+        As for these facts, we need that everything inside the spawn block is thread-safe.
+         */
+        // For every line we spawn async tasks that will perform the protocol readed from stdin. We need to lock shared resources for every tasks in order to avoid concurrency
+        tasks.push(tokio::spawn(async move {
+            // Lock on both the node and the stdout
+            let mut node_lock = node_clone.lock().await;
+            let mut stdout_lock = stdout_clone.lock().await;
+
+            // Performing the step function for every task
+            node_lock.step(input, &mut stdout_lock).await
+        }));
     }
 
-    // Wait for every thread to finish
-    jh.join()
-        .expect("stdin thread panicked")
-        .context("stdin thread error")?;
+    // Wait for every task to finish
+    for task in tasks {
+        let _ = task.await?;
+    }
 
     Ok(())
 }

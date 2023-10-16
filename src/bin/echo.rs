@@ -1,7 +1,13 @@
 use anyhow::Context;
 use rustengan::*;
 use serde::{Deserialize, Serialize};
-use std::io::{StdoutLock, Write};
+use tokio::{
+    io::{AsyncWriteExt, Stdout},
+    sync::Mutex,
+    task::{self, JoinHandle},
+};
+use async_trait::async_trait;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // Serde decorator to call Payload as type
@@ -18,11 +24,11 @@ struct EchoNode {
 }
 
 // Implementation of the trait Node for EchoNode
+#[async_trait]
 impl Node<(), Payload> for EchoNode {
     fn from_init(
         _state: (),
         _init: Init,
-        _sx: std::sync::mpsc::Sender<Event<Payload>>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -31,12 +37,7 @@ impl Node<(), Payload> for EchoNode {
     }
 
     // fn step to act at any given message depending on its payload
-    fn step<'a>(&mut self, input: Event<Payload>, output: &mut StdoutLock) -> anyhow::Result<()> {
-
-        // We assure that the Event we receive is an message type one, not a injected
-        let Event::Message(input) = input else {
-            panic!("got injected event when there's no event injection");
-        };
+    async fn step<'a>(&mut self, input: Message<Payload>, output:  &'a mut tokio::io::Stdout) -> anyhow::Result<()> {
 
         match input.body.payload {
             Payload::Echo { echo } => {
@@ -49,9 +50,8 @@ impl Node<(), Payload> for EchoNode {
                         payload: Payload::EchoOk { echo },
                     },
                 };
-                serde_json::to_writer(&mut *output, &reply)
-                    .context("serialize response to init")?;
-                output.write_all(b"\n").context("write trailing newline")?;
+                output.write(&serde_json::to_vec(&reply).expect("Cannot convert to bytes")).await?;
+                output.write(b"\n").await?;
                 self.id += 1;
             }
             Payload::EchoOk { .. } => {}
@@ -62,7 +62,7 @@ impl Node<(), Payload> for EchoNode {
 
 fn main() -> anyhow::Result<()> {
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
-    let _ = main_loop::<_, EchoNode, _, _>(());
+    let _ = main_loop::<_, EchoNode, _>(());
     Ok(())
 }
 

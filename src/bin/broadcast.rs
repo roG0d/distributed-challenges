@@ -1,12 +1,16 @@
 use anyhow::Context;
+use async_trait::async_trait;
 use rand::prelude::*;
 use rustengan::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    io::{StderrLock, StdoutLock, Write},
-    sync::mpsc::Sender,
     time::Duration,
+};
+use tokio::{
+    io::{AsyncWriteExt, Stdout},
+    sync::Mutex,
+    task::{self, JoinHandle},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,11 +42,6 @@ enum Payload {
     },
 }
 
-// enum for events
-enum InjectedPayload {
-    Gossip,
-}
-
 struct BroadcastNode {
     node: String,
     id: usize,
@@ -56,26 +55,15 @@ struct BroadcastNode {
 }
 
 // Implementation of the trait Node for BroadcastNode
-impl Node<(), Payload, InjectedPayload> for BroadcastNode {
+#[async_trait]
+impl Node<(), Payload> for BroadcastNode {
     fn from_init(
         _state: (),
         init: Init,
-        sx: std::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
-        // Threads that will send a gossip event every 300 milis til end of execution
-        std::thread::spawn(move || {
-            // Generate gossip events
-            // Handle EOF signal
-            loop {
-                std::thread::sleep(Duration::from_millis(300));
-                if let Err(_) = sx.send(Event::Injected(InjectedPayload::Gossip)) {
-                    break;
-                }
-            }
-        });
 
         Ok(BroadcastNode {
             node: init.node_id,
@@ -92,57 +80,13 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
     }
 
     // fn step to act at any given message depending on its payload
-    fn step<'a>(
+    async fn step<'a>(
         &mut self,
-        input: Event<Payload, InjectedPayload>,
-        output: &mut StdoutLock,
+        input: Message<Payload>,
+        output: &'a mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         // Match for every possible event
-        match input {
-            Event::EOF => {
-                todo!();
-            }
-
-            // If we get and Event we match which and then perform the task
-            Event::Injected(payload) => match payload {
-                // For a gossip, we send a message to our neighborhood with the nodes we know about, reminding which nodes
-                // they already known
-                InjectedPayload::Gossip => {
-                    for n in &self.neighborhood {
-                        // 1/4 times we let a gossip with every known node, bypassing the optimization but securing dropped messages
-                        let mut known_to_n = &HashSet::new();
-                        let mut rng = rand::thread_rng();
-
-                        if rng.gen::<f32>() < 0.75 {
-                            known_to_n = self.known.get_mut(n).expect("unkown node");
-                        }
-
-                        Message {
-                            src: self.node.clone(),
-                            dst: n.clone(),
-                            body: Body {
-                                id: None,
-                                in_reply_to: None,
-                                payload: Payload::Gossip {
-                                    seen: self
-                                        .messages
-                                        .iter()
-                                        .copied()
-                                        .filter(|m| !known_to_n.contains(m))
-                                        .collect(),
-                                },
-                            },
-                        }
-                        .send(&mut *output)
-                        .with_context(|| format!("gossip to {}", n))?;
-                    }
-
-                    Ok(())
-                }
-            },
-            Event::Message(input) => {
                 let mut reply = input.clone().into_reply(Some(&mut self.id));
-
                 match reply.body.payload {
                     // if we get a gossip payload, we extend the list of messages received and the map of known nodes
                     Payload::Gossip { seen } => {
@@ -153,10 +97,26 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
                         self.messages.extend(seen);
                     }
                     Payload::Broadcast { message } => {
-                        self.messages.insert(message);
+                        
                         reply.body.payload = Payload::BroadcastOk {};
-                        // Serialize the rust struct into a json object with context in case of fail
-                        reply.send(&mut *output).context("reply to broadcast")?;
+                        reply.send(&mut *output).await.context("reply to broadcast")?;
+
+                        if !self.messages.contains(&message){
+                            for neighbor in self.neighborhood.iter() {
+                                let broadcast_reply = Message {
+                                    src: self.node.clone(),
+                                    dst: neighbor.clone(),
+                                    body: Body {
+                                        id: Some(self.id),
+                                        in_reply_to: input.body.id,
+                                        payload: Payload::Broadcast { message },
+                                    },
+                                };
+                            broadcast_reply.send(&mut *output).await?;
+                            }
+                    }
+                    self.messages.insert(message);
+                       
                     }
 
                     Payload::Read { .. } => {
@@ -164,7 +124,7 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
                             messages: self.messages.clone(),
                         };
                         // Serialize the rust struct into a json object with context in case of fail
-                        reply.send(&mut *output).context("reply to read")?;
+                        reply.send(&mut *output).await.context("reply to read")?;
                     }
 
                     Payload::Topology { mut topology } => {
@@ -172,7 +132,7 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
                             .remove(&self.node)
                             .unwrap_or_else(|| panic!("No topology given for node {}", self.node));
                         reply.body.payload = Payload::TopologyOk {};
-                        reply.send(&mut *output).context("reply to topology")?;
+                        reply.send(&mut *output).await.context("reply to topology")?;
                     }
 
                     // A way to group up different matches with the same handler
@@ -183,12 +143,10 @@ impl Node<(), Payload, InjectedPayload> for BroadcastNode {
                 Ok(())
             }
         }
-    }
-}
 
 fn main() -> anyhow::Result<()> {
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
-    let _ = main_loop::<_, BroadcastNode, _, _>(());
+    let _ = main_loop::<_, BroadcastNode, _>(());
     Ok(())
 }
 

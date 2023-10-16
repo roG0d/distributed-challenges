@@ -41,22 +41,14 @@ impl<Payload> Message<Payload> {
     }
 
     // Send method to reply for different messages
-    pub fn send(&self, output: &mut impl Write) -> anyhow::Result<()>
+    pub async fn send<'a>(&self, output: &'a mut tokio::io::Stdout,) -> anyhow::Result<()>
     where
         Payload: Serialize,
     {
-        serde_json::to_writer(&mut *output, self).context("serialize response message")?;
-        let _ = output.write_all(b"\n").context("write trailing newline");
+        output.write(&serde_json::to_vec(self).expect("Cannot convert to bytes")).await?;
+        output.write(b"\n").await?;
         Ok(())
     }
-}
-
-// Messages sent to the Sender channel representing an Event
-#[derive(Debug, Clone)]
-pub enum Event<Payload, InjectedPayload = ()> {
-    Message(Message<Payload>),
-    Injected(InjectedPayload),
-    EOF,
 }
 
 // Body struct

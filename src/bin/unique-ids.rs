@@ -2,7 +2,12 @@ use anyhow::Context;
 use rustengan::*;
 use serde::{Deserialize, Serialize};
 //use ulid::Ulid;
-use std::io::{StdoutLock, Write};
+use tokio::{
+    io::{AsyncWriteExt, Stdout},
+    sync::Mutex,
+    task::{self, JoinHandle},
+};
+use async_trait::async_trait;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // Serde decorator to call Payload as type
@@ -23,11 +28,11 @@ struct UniqueNode {
 }
 
 // Implementation of the trait Node for EchoNode
+#[async_trait]
 impl Node<(), Payload> for UniqueNode {
     fn from_init(
         _state: (),
         init: Init,
-        _sx: std::sync::mpsc::Sender<Event<Payload>>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -39,10 +44,7 @@ impl Node<(), Payload> for UniqueNode {
     }
 
     // fn step to act at any given message depending on its payload
-    fn step<'a>(&mut self, input: Event<Payload>, output: &mut StdoutLock) -> anyhow::Result<()> {
-        let Event::Message(input) = input else {
-            panic!("got injected event when there's no event injection");
-        };
+    async fn step<'a>(&mut self, input: Message<Payload>, output:  &'a mut tokio::io::Stdout) -> anyhow::Result<()> {
 
         let mut reply = input.into_reply(Some(&mut self.id));
         match reply.body.payload {
@@ -53,9 +55,8 @@ impl Node<(), Payload> for UniqueNode {
                 reply.body.payload = Payload::GenerateOk { guid };
 
                 // Serialize the rust struct into a json object with context in case of fail
-                serde_json::to_writer(&mut *output, &reply)
-                    .context("serialize response to generate")?;
-                let _ = output.write_all(b"\n").context("Write trailing newline");
+                output.write(&serde_json::to_vec(&reply).expect("Cannot convert to bytes")).await?;
+                output.write(b"\n").await?;
                 self.id += 1;
             }
             Payload::GenerateOk { .. } => {}
@@ -66,7 +67,7 @@ impl Node<(), Payload> for UniqueNode {
 
 fn main() -> anyhow::Result<()> {
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
-    let _ = main_loop::<_, UniqueNode, _, _>(());
+    let _ = main_loop::<_, UniqueNode, _>(());
     Ok(())
 }
 

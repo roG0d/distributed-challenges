@@ -58,6 +58,7 @@ impl Node<(), Payload> for EchoNode {
         }
         Ok(())
     }
+
 }
 
 fn main() -> anyhow::Result<()> {

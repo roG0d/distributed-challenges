@@ -9,8 +9,9 @@ use std::{
 };
 use tokio::{
     io::{AsyncWriteExt, Stdout},
+    select,
     sync::Mutex,
-    task::{self, JoinHandle},
+    task::{self, JoinHandle}, time::sleep,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,9 +48,6 @@ struct BroadcastNode {
     id: usize,
     messages: HashSet<usize>,
 
-    // Kinda memory for which messages to whom node we have sent to
-    msg_history: HashMap<String, HashSet<usize>>,
-
     // Map with info about nodes and their knowns neighbors
     known: HashMap<String, HashSet<usize>>,
 
@@ -64,18 +62,16 @@ impl Node<(), Payload> for BroadcastNode {
     where
         Self: Sized,
     {
-        let init_hashmaps: HashMap<String, HashSet<usize>> = init
-            .node_ids
-            .into_iter()
-            .map(|nid| (nid, HashSet::new()))
-            .collect();
-
         Ok(BroadcastNode {
             node: init.node_id,
             id: 1,
             messages: HashSet::new(),
-            known: init_hashmaps.clone(),
-            msg_history: init_hashmaps.clone(),
+            known: init
+                .node_ids
+                .into_iter()
+                .map(|nid| (nid, HashSet::new()))
+                .collect(),
+
             neighborhood: Vec::new(),
         })
     }
@@ -96,32 +92,16 @@ impl Node<(), Payload> for BroadcastNode {
                     .expect("got gossip from unknown node")
                     .extend(seen.iter().copied());
                 self.messages.extend(seen);
+
             }
             Payload::Broadcast { message } => {
+                self.messages.insert(message);
                 reply.body.payload = Payload::BroadcastOk {};
+                // Serialize the rust struct into a json object with context in case of fail
                 reply
                     .send(&mut *output)
                     .await
                     .context("reply to broadcast")?;
-
-                if !self.messages.contains(&message) {
-                    for neighbor in self.neighborhood.iter() {
-                        if !self.msg_history[neighbor].contains(&message) {
-                            let broadcast_reply = Message {
-                                src: self.node.clone(),
-                                dst: neighbor.clone(),
-                                body: Body {
-                                    id: Some(self.id),
-                                    in_reply_to: input.body.id,
-                                    payload: Payload::Broadcast { message },
-                                },
-                            };
-                            broadcast_reply.send(&mut *output).await?;
-                            self.msg_history.get_mut(neighbor).expect("Unknow node").insert(message);
-                        }
-                    }
-                }
-                self.messages.insert(message);
             }
 
             Payload::Read { .. } => {
@@ -148,7 +128,38 @@ impl Node<(), Payload> for BroadcastNode {
         }
         Ok(())
     }
+
+    // CHECK IF ITS BETTER TO HAVE AN ARC REFERENCE TO STDOUT HERE AND IN THE SEND FUNCTION
+    async fn gossip<'a>(&mut self, output: &'a mut tokio::io::Stdout){
+
+        for n in &self.neighborhood {
+            // 3/4 times we let a gossip with every known node, bypassing the optimization but securing dropped messages
+            let known_to_n = self.known.get(n).expect("unknow node");
+
+            eprintln!("sending gossip {:?} to {}", self.messages, n);
+            eprintln!("known messages {:?} to {}", known_to_n, n);
+
+            let _ = Message {
+                src: self.node.clone(),
+                dst: n.clone(),
+                body: Body {
+                    id: None,
+                    in_reply_to: None,
+                    payload: Payload::Gossip {
+                        seen: self
+                            .messages
+                            .iter()
+                            .copied()
+                            .filter(|m| !known_to_n.contains(m))
+                            .collect(),
+                    },
+                },
+            }
+            .send(&mut *output).await;
+        }
+    }
 }
+
 
 fn main() -> anyhow::Result<()> {
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)

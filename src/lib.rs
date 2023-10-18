@@ -3,6 +3,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
+    any::TypeId,
     future::Future,
     io::{stdin, BufRead, StdoutLock, Write},
     sync::Arc,
@@ -41,11 +42,13 @@ impl<Payload> Message<Payload> {
     }
 
     // Send method to reply for different messages
-    pub async fn send<'a>(&self, output: &'a mut tokio::io::Stdout,) -> anyhow::Result<()>
+    pub async fn send<'a>(&self, output: &'a mut tokio::io::Stdout) -> anyhow::Result<()>
     where
         Payload: Serialize,
     {
-        output.write(&serde_json::to_vec(self).expect("Cannot convert to bytes")).await?;
+        output
+            .write(&serde_json::to_vec(self).expect("Cannot convert to bytes"))
+            .await?;
         output.write(b"\n").await?;
         Ok(())
     }
@@ -92,6 +95,8 @@ pub trait Node<S, Payload> {
         input: Message<Payload>,
         output: &'a mut tokio::io::Stdout,
     ) -> anyhow::Result<()>;
+
+    async fn gossip<'a>(&mut self, output: &'a mut tokio::io::Stdout) {}
 }
 
 /*
@@ -148,8 +153,7 @@ where
     stdout.write_all(b"\n").await?;
 
     // Protocols phase
-    // Vec for accumulate the tasks and lastly, wait for them to finish
-    let mut tasks = vec![];
+    let mut tasks = Vec::new();
 
     // Two thread-safe reference-counting pointer for shared values as the node and the stdout has both async properties and need to be thread-safe if we want to spawn async task
     let node = Arc::new(Mutex::new(node));
@@ -191,8 +195,8 @@ where
             // Lock on both the node and the stdout
             let mut node_lock = node_clone.lock().await;
             let mut stdout_lock = stdout_clone.lock().await;
-
             // Performing the step function for every task
+            node_lock.gossip(&mut stdout_lock).await;
             node_lock.step(input, &mut stdout_lock).await
         }));
     }

@@ -18,4 +18,4 @@ Each challenge has its own branch inside the repo, containing its solution. The 
 
 -  inside `src/` there's a **challenge**.rs containing the specific implementation for each problem.
 
-As for side exercise, there's an async implementation of every challenge up to #3, more info inside the code in the `async_third` branch.
+As for side exercise, there's an async implementation of every challenge up to #3, more info inside the code in the `third_async` branch.

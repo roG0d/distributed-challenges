@@ -6,12 +6,12 @@ use std::{
     any::TypeId,
     future::Future,
     io::{stdin, BufRead, StdoutLock, Write},
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 use tokio::{
     io::{AsyncWriteExt, Stdout},
     sync::Mutex,
-    task::{self, JoinHandle},
+    task::{self, JoinHandle}, time::sleep,
 };
 
 // Struct Message
@@ -42,14 +42,17 @@ impl<Payload> Message<Payload> {
     }
 
     // Send method to reply for different messages
-    pub async fn send<'a>(&self, output: &'a mut tokio::io::Stdout) -> anyhow::Result<()>
+    pub async fn send<'a>(&self, output: &'a mut Arc<Mutex<Stdout>>) -> anyhow::Result<()>
     where
         Payload: Serialize,
     {
-        output
+        let output_clone = Arc::clone(output);
+        let mut output_lock = output_clone.lock().await;
+
+        output_lock
             .write(&serde_json::to_vec(self).expect("Cannot convert to bytes"))
             .await?;
-        output.write(b"\n").await?;
+        output_lock.write(b"\n").await?;
         Ok(())
     }
 }
@@ -84,7 +87,7 @@ pub struct Init {
 #[async_trait]
 pub trait Node<S, Payload> {
     // Init for the specific node
-    fn from_init(state: S, init: Init) -> anyhow::Result<Self>
+    async fn from_init<'a>(state: S, init: Init) -> anyhow::Result<Self>
     where
         Self: Sized;
 
@@ -93,10 +96,11 @@ pub trait Node<S, Payload> {
     async fn step<'a>(
         &mut self,
         input: Message<Payload>,
-        output: &'a mut tokio::io::Stdout,
+        output: &'a mut Arc<Mutex<Stdout>>,
     ) -> anyhow::Result<()>;
 
-    async fn gossip<'a>(&mut self, output: &'a mut tokio::io::Stdout) {}
+    async fn gossip<'a>(&mut self, output: &'a mut Arc<Mutex<Stdout>>){
+    }
 }
 
 /*
@@ -117,7 +121,8 @@ where
     let mut stdin = stdin.lines();
 
     // Create the async stdout
-    let mut stdout = tokio::io::stdout();
+    let stdout = tokio::io::stdout();
+    let stdout = Arc::new(Mutex::new(stdout));
 
     // Get the first msg from stdin to check if there's messages
     let init_msg: Message<InitPayload> = serde_json::from_str(
@@ -134,8 +139,7 @@ where
     };
 
     // If so, initialize the node and send a initOk reply
-    let node: N = Node::from_init(init_state, init).context("node initilization failed")?;
-
+    let node: N = Node::from_init(init_state, init).await?;
     let reply = Message {
         src: init_msg.dst,
         dst: init_msg.src,
@@ -147,17 +151,19 @@ where
     };
 
     // reply to the init in the async stdout
-    stdout
-        .write_all(&serde_json::to_vec(&reply).expect("Cannot convert to bytes"))
-        .await?; // Serialize the respond and write it into the buffer -> await needed to wait for the completion of the future
-    stdout.write_all(b"\n").await?;
+    let _ = reply.send(&mut stdout.clone()).await;
 
     // Protocols phase
     let mut tasks = Vec::new();
 
     // Two thread-safe reference-counting pointer for shared values as the node and the stdout has both async properties and need to be thread-safe if we want to spawn async task
     let node = Arc::new(Mutex::new(node));
-    let stdout = Arc::new(Mutex::new(stdout));
+
+
+
+    // I THINK WE NEED A LOOP FOR THE GOSSIP SO THE NEMESIS PARTITTION (NO COMMUNICATION IN A CONCRETE TIME WINDOW) CAN BE MANAGED
+    //let futere  = node.clone().lock().await.gossip(&mut stdout.clone());
+    
 
     /* CLARIFICATION ARC-MUTEX
     In Rust, values are moved when they are passed to functions or closures, and by default they cannot be used again after being moved unless they implement the Copy trait.
@@ -169,10 +175,20 @@ where
 
      */
     // For every line we get from the sync stdin:
+    /*NOTE ON STDIN
+    Maelstrom will redirect every message nodes write onto stdout to stdin, this was discovered as we introduced gossip messages so the total load of message increased
+    significally    
+     */
+    let mut line_iter  = 0; 
     for line in stdin {
+        eprint!("iteration of loop lines nº{}", line_iter);
+        eprintln!(" line emited: {}", line.as_ref().expect("no line"));
+
+        line_iter += 1;
+
         // We clone the Arc (not the stdout and the node themself), which increments the reference count but doesn't duplicate the underlying object.
         let node_clone = Arc::clone(&node);
-        let stdout_clone = Arc::clone(&stdout);
+        let mut stdout_clone = Arc::clone(&stdout);
 
         // Parsing the stdin lines
         let line = line
@@ -191,13 +207,15 @@ where
         As for these facts, we need that everything inside the spawn block is thread-safe.
          */
         // For every line we spawn async tasks that will perform the protocol readed from stdin. We need to lock shared resources for every tasks in order to avoid concurrency
+        
         tasks.push(tokio::spawn(async move {
             // Lock on both the node and the stdout
             let mut node_lock = node_clone.lock().await;
-            let mut stdout_lock = stdout_clone.lock().await;
-            // Performing the step function for every task
-            node_lock.gossip(&mut stdout_lock).await;
-            node_lock.step(input, &mut stdout_lock).await
+            // A rough wait to manage the gossip load, we will gossip every two lines readed, so we ensure we reduce the total number of gossip message by half
+            if line_iter % 2 == 0 {let _ = node_lock.gossip(&mut stdout_clone).await;}
+             // Performing the step function for every task
+            node_lock.step(input, &mut stdout_clone).await
+            
         }));
     }
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Context;
 use rustengan::*;
 use serde::{Deserialize, Serialize};
@@ -30,10 +32,7 @@ struct UniqueNode {
 // Implementation of the trait Node for EchoNode
 #[async_trait]
 impl Node<(), Payload> for UniqueNode {
-    fn from_init(
-        _state: (),
-        init: Init,
-    ) -> anyhow::Result<Self>
+    async fn from_init<'a>(_state: (), init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -44,7 +43,9 @@ impl Node<(), Payload> for UniqueNode {
     }
 
     // fn step to act at any given message depending on its payload
-    async fn step<'a>(&mut self, input: Message<Payload>, output:  &'a mut tokio::io::Stdout) -> anyhow::Result<()> {
+    async fn step<'a>(&mut self, input: Message<Payload>, output:  &'a mut Arc<Mutex<Stdout>>) -> anyhow::Result<()> {
+
+        let mut output_clone = Arc::clone(output);            
 
         let mut reply = input.into_reply(Some(&mut self.id));
         match reply.body.payload {
@@ -55,8 +56,7 @@ impl Node<(), Payload> for UniqueNode {
                 reply.body.payload = Payload::GenerateOk { guid };
 
                 // Serialize the rust struct into a json object with context in case of fail
-                output.write(&serde_json::to_vec(&reply).expect("Cannot convert to bytes")).await?;
-                output.write(b"\n").await?;
+                let _ = reply.send(&mut output_clone).await;
                 self.id += 1;
             }
             Payload::GenerateOk { .. } => {}

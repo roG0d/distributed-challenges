@@ -5,13 +5,15 @@ use rustengan::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
     io::{AsyncWriteExt, Stdout},
-    select,
+    select, spawn,
     sync::Mutex,
-    task::{self, JoinHandle}, time::sleep,
+    task::{self, JoinHandle},
+    time::sleep,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +60,10 @@ struct BroadcastNode {
 // Implementation of the trait Node for BroadcastNode
 #[async_trait]
 impl Node<(), Payload> for BroadcastNode {
-    fn from_init(_state: (), init: Init) -> anyhow::Result<Self>
+    async fn from_init<'a>(
+        _state: (),
+        init: Init,
+    ) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -80,9 +85,10 @@ impl Node<(), Payload> for BroadcastNode {
     async fn step<'a>(
         &mut self,
         input: Message<Payload>,
-        output: &'a mut tokio::io::Stdout,
+        output: &'a mut Arc<Mutex<Stdout>>,
     ) -> anyhow::Result<()> {
         // Match for every possible event
+
         let mut reply = input.clone().into_reply(Some(&mut self.id));
         match reply.body.payload {
             // if we get a gossip payload, we extend the list of messages received and the map of known nodes
@@ -92,7 +98,6 @@ impl Node<(), Payload> for BroadcastNode {
                     .expect("got gossip from unknown node")
                     .extend(seen.iter().copied());
                 self.messages.extend(seen);
-
             }
             Payload::Broadcast { message } => {
                 self.messages.insert(message);
@@ -129,9 +134,8 @@ impl Node<(), Payload> for BroadcastNode {
         Ok(())
     }
 
-    // CHECK IF ITS BETTER TO HAVE AN ARC REFERENCE TO STDOUT HERE AND IN THE SEND FUNCTION
-    async fn gossip<'a>(&mut self, output: &'a mut tokio::io::Stdout){
-
+    // CHECK IF ITS BETTER TO HAVE AN ARC REFERENCE TO STDOUT HERE AND IN THE SEND FUNCTION --> Actually, it has more sense
+    async fn gossip<'a>(&mut self, output: &'a mut Arc<Mutex<Stdout>>) {
         for n in &self.neighborhood {
             // 3/4 times we let a gossip with every known node, bypassing the optimization but securing dropped messages
             let known_to_n = self.known.get(n).expect("unknow node");
@@ -155,11 +159,11 @@ impl Node<(), Payload> for BroadcastNode {
                     },
                 },
             }
-            .send(&mut *output).await;
+            .send(&mut *output)
+            .await;
         }
     }
 }
-
 
 fn main() -> anyhow::Result<()> {
     //We call the main_loop function with a initial state (as we had the trait implemented for EchoNode)
